@@ -1,6 +1,8 @@
 import java.net.Socket;
 import java.security.*;
 import java.util.Scanner;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import org.json.JSONObject;
 
@@ -9,14 +11,14 @@ public class ClientMain {
     private static PrivateKey privateKey;
     private static String username;
 
+    private static BlockingQueue<JSONObject> responseQueue =
+            new LinkedBlockingQueue<>();
+
     public static void main(String[] args) throws Exception {
 
         Socket socket = new Socket("127.0.0.1", 12345);
         Scanner sc = new Scanner(System.in);
 
-        System.out.println("Connected to server.");
-
-        // Start receiver thread
         startReceiver(socket);
 
         while (true) {
@@ -26,137 +28,111 @@ public class ClientMain {
             System.out.println("3 Send message");
             System.out.println("4 Exit");
 
-            System.out.print("> ");
             String choice = sc.nextLine();
 
-            switch (choice) {
+            if (choice.equals("1")) {
 
-                // ======================
-                // REGISTER
-                // ======================
-                case "1":
+                System.out.print("Username: ");
+                username = sc.nextLine();
 
-                    System.out.print("Username: ");
-                    username = sc.nextLine();
+                System.out.print("Password: ");
+                String password = sc.nextLine();
 
-                    System.out.print("Password: ");
-                    String password = sc.nextLine();
+                KeyPair pair = CryptoUtils.generateRSAKeys();
 
-                    KeyPair pair = CryptoUtils.generateRSAKeys();
+                privateKey = pair.getPrivate();
 
-                    privateKey = pair.getPrivate();
+                CryptoUtils.savePrivateKey(username, privateKey);
 
-                    CryptoUtils.savePrivateKey(username, privateKey);
+                JSONObject obj = new JSONObject();
 
-                    JSONObject reg = new JSONObject();
+                obj.put("type", "register");
+                obj.put("username", username);
+                obj.put("password", password);
+                obj.put("public_key",
+                        CryptoUtils.serializePublicKey(pair.getPublic()));
 
-                    reg.put("type", "register");
-                    reg.put("username", username);
-                    reg.put("password", password);
-                    reg.put(
-                            "public_key",
-                            CryptoUtils.serializePublicKey(pair.getPublic())
-                    );
+                JsonUtil.sendJson(socket, obj);
 
-                    JsonUtil.sendJson(socket, reg);
+                System.out.println(responseQueue.take());
+            }
 
-                    break;
+            else if (choice.equals("2")) {
 
-                // ======================
-                // LOGIN
-                // ======================
-                case "2":
+                System.out.print("Username: ");
+                username = sc.nextLine();
 
-                    System.out.print("Username: ");
-                    username = sc.nextLine();
+                System.out.print("Password: ");
+                String password = sc.nextLine();
 
-                    System.out.print("Password: ");
-                    password = sc.nextLine();
+                privateKey = CryptoUtils.loadPrivateKey(username);
 
-                    privateKey = CryptoUtils.loadPrivateKey(username);
+                JSONObject obj = new JSONObject();
 
-                    JSONObject login = new JSONObject();
+                obj.put("type", "login");
+                obj.put("username", username);
+                obj.put("password", password);
 
-                    login.put("type", "login");
-                    login.put("username", username);
-                    login.put("password", password);
+                JsonUtil.sendJson(socket, obj);
 
-                    JsonUtil.sendJson(socket, login);
+                System.out.println(responseQueue.take());
+            }
 
-                    break;
+            else if (choice.equals("3")) {
 
-                // ======================
-                // SEND MESSAGE
-                // ======================
-                case "3":
+                if (privateKey == null) {
+                    System.out.println("Login first.");
+                    continue;
+                }
 
-                    if (privateKey == null) {
-                        System.out.println("Login first.");
-                        break;
-                    }
+                System.out.print("To: ");
+                String target = sc.nextLine();
 
-                    System.out.print("To: ");
-                    String target = sc.nextLine();
+                System.out.print("Message: ");
+                String text = sc.nextLine();
 
-                    System.out.print("Message: ");
-                    String text = sc.nextLine();
+                JSONObject ask = new JSONObject();
 
-                    // ask for public key
-                    JSONObject ask = new JSONObject();
+                ask.put("type", "get_pubkey");
+                ask.put("username", target);
 
-                    ask.put("type", "get_pubkey");
-                    ask.put("username", target);
+                JsonUtil.sendJson(socket, ask);
 
-                    JsonUtil.sendJson(socket, ask);
+                JSONObject resp = responseQueue.take();
 
-                    JSONObject resp = JsonUtil.recvJson(socket);
+                if (!resp.has("public_key")) {
+                    System.out.println("User not found.");
+                    continue;
+                }
 
-                    if (!resp.has("public_key")) {
-                        System.out.println("User not found.");
-                        break;
-                    }
+                PublicKey pub =
+                        CryptoUtils.deserializePublicKey(
+                                resp.getString("public_key"));
 
-                    PublicKey pub =
-                            CryptoUtils.deserializePublicKey(
-                                    resp.getString("public_key")
-                            );
+                EncryptedMessage enc =
+                        CryptoUtils.encrypt(pub, text);
 
-                    EncryptedMessage enc =
-                            CryptoUtils.encrypt(pub, text);
+                JSONObject msg = new JSONObject();
 
-                    JSONObject msg = new JSONObject();
+                msg.put("type", "send");
+                msg.put("to", target);
+                msg.put("wrapped_key", enc.wrappedKey);
+                msg.put("nonce", enc.nonce);
+                msg.put("ciphertext", enc.ciphertext);
 
-                    msg.put("type", "send");
-                    msg.put("to", target);
-                    msg.put("wrapped_key", enc.wrappedKey);
-                    msg.put("nonce", enc.nonce);
-                    msg.put("ciphertext", enc.ciphertext);
+                JsonUtil.sendJson(socket, msg);
 
-                    JsonUtil.sendJson(socket, msg);
+                System.out.println(responseQueue.take());
+            }
 
-                    break;
+            else if (choice.equals("4")) {
 
-                // ======================
-                // EXIT
-                // ======================
-                case "4":
-
-                    socket.close();
-                    sc.close();
-
-                    System.out.println("Disconnected.");
-
-                    return;
-
-                default:
-                    System.out.println("Invalid option");
+                socket.close();
+                sc.close();
+                break;
             }
         }
     }
-
-    // ======================
-    // RECEIVER THREAD
-    // ======================
 
     private static void startReceiver(Socket socket) {
 
@@ -166,15 +142,12 @@ public class ClientMain {
 
                 while (true) {
 
-                    JSONObject msg =
-                            JsonUtil.recvJson(socket);
+                    JSONObject msg = JsonUtil.recvJson(socket);
 
                     if (msg == null)
                         break;
 
-                    String type = msg.optString("type");
-
-                    if (type.equals("incoming")) {
+                    if (msg.getString("type").equals("incoming")) {
 
                         String text =
                                 CryptoUtils.decrypt(
@@ -187,16 +160,12 @@ public class ClientMain {
                                 );
 
                         System.out.println(
-                                "\n[" +
-                                msg.getString("from") +
-                                "] " +
-                                text
+                                "\n[" + msg.getString("from") + "] " + text
                         );
-                    }
-                    else {
 
-                        System.out.println(msg.toString(2));
+                    } else {
 
+                        responseQueue.put(msg);
                     }
                 }
 
